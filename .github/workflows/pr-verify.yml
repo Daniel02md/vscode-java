@@ -1,55 +1,13 @@
-name: pr-verify
+name: runner-passive-inventory
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
 
-jobs:
-  pr-verify-job:
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    steps:
-      - name: Check Out Code
-        uses: actions/checkout@v4
-      - name: Set Up NodeJS
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Set Up Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '25'
-          distribution: 'temurin'
-      - run: npm install -g typescript "@vscode/vsce"
-      - run: wget http://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz
-      - run: mkdir server && tar -xvzf jdt-language-server-latest.tar.gz -C ./server && rm jdt-language-server-latest.tar.gz
-      - run: npm install
-      - run: npm run repo:check
-      - run: npm run compile
-      - run: npm run vscode:prepublish
-      - run: vsce package
-      - run: ls -ll java-*vsix
-      - run: npm run eslint
-      - name: Run Tests
-        if: runner.os == 'Linux'
-        env:
-          SKIP_COMMANDS_TEST: true
-        run: $(echo "xvfb-run --auto-servernum") npm run test --silent
-      - name: Run Tests
-        if: runner.os != 'Linux'
-        env:
-          SKIP_COMMANDS_TEST: true
-          SKIP_CLASSPATH_TEST: true
-        run: npm run test --silent
+permissions:
+  contents: read
 
-  runner-passive-inventory:
-    if: github.event_name == 'workflow_dispatch'
+jobs:
+  inventory:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -67,18 +25,11 @@ jobs:
           cat /sys/class/dmi/id/product_name 2>/dev/null || true
           cat /sys/hypervisor/type 2>/dev/null || true
           echo
-          echo "=== CPU ==="
-          lscpu | sed -n '1,40p'
-          echo
-          echo "=== Block devices ==="
-          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || true
-          echo
           echo "=== Network interfaces ==="
           for nic in /sys/class/net/*; do
             name="${nic##*/}"
             echo "--- $name ---"
             readlink -f "$nic/device/driver" 2>/dev/null || echo "driver: (none)"
-            cat "$nic/address" 2>/dev/null || true
             ip -o addr show dev "$name" 2>/dev/null | sed 's/.*inet/    inet/' || true
           done
           echo
@@ -89,14 +40,5 @@ jobs:
             ethtool -k "$name" 2>/dev/null | sed -n '1,80p' || true
           done
           echo
-          echo "=== PCI devices ==="
-          lspci -nnk 2>/dev/null || true
-          echo
           echo "=== Kernel modules (virtio/hv/net) ==="
           lsmod | grep -Ei 'virtio|hv_|netvsc|hv_netvsc' || echo "(no matching modules loaded)"
-          echo
-          echo "=== Capabilities ==="
-          capsh --print 2>/dev/null | sed -n '1,40p' || true
-          echo
-          echo "=== Seccomp ==="
-          grep Seccomp /proc/self/status || true
