@@ -301,7 +301,7 @@ def tune_payload(hdr63, udp, plen):
     return bytes(payload), None                 # fall back to fixed payload
 
 
-def open_sockets():
+def open_tx_socket():
     out("socket_stage", step="tx_create")
     tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
     out("socket_stage", step="tx_vnet_hdr")
@@ -310,13 +310,17 @@ def open_sockets():
     # Python's AF_PACKET address tuple takes the Ethernet protocol in host
     # byte order; socket() itself takes the network-order protocol value.
     tx.bind(("vInTx", ETH_P_ALL))
+    return tx
+
+
+def open_capture_socket():
     out("socket_stage", step="capture_create")
     cap = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
     out("socket_stage", step="capture_bind")
     cap.bind(("vOutRx", ETH_P_ALL))
     cap.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
     out("socket_stage", step="ready")
-    return tx, cap
+    return cap
 
 
 def classify(frame):
@@ -439,7 +443,7 @@ def main():
         return
 
     time.sleep(0.3)
-    tx, cap = open_sockets()
+    cap = open_capture_socket()
     before = snmp_counters()
 
     payload_len = DGRAM_LEN - 28
@@ -453,9 +457,11 @@ def main():
     # ---- control: valid metadata (csum_start = start of UDP header) ----
     payload_c = b"\xA5" * payload_len
     tx_c, _ = build_case(0x6001, 34, 6, payload_c)
+    tx = open_tx_socket()
     out("send_stage", case="control", step="before", bytes=len(tx_c))
     sent_c = tx.send(tx_c)
     out("send_stage", case="control", step="after", bytes=sent_c)
+    tx.close()
     frames_c = collect(cap, 1.5)
     ctrl_frags = report_case("control", frames_c, 0x6001, payload_c, ctrl_udp_check)
 
@@ -464,9 +470,22 @@ def main():
     out("active_target", checksum="0x%04x" % expected if expected else "unresolved",
         payload_head=payload_a[:8].hex())
     tx_a, datagram = build_case(0x6002, 14, 0, payload_a)
+    tx = open_tx_socket()
     out("send_stage", case="active", step="before", bytes=len(tx_a))
-    sent_a = tx.send(tx_a)
-    out("send_stage", case="active", step="after", bytes=sent_a)
+    try:
+        sent_a = tx.send(tx_a)
+        out("send_stage", case="active", step="after", bytes=sent_a)
+    except OSError as exc:
+        out("send_stage", case="active", step="error", errno=exc.errno,
+            strerror=exc.strerror)
+        tx.close()
+        cap.close()
+        out("verdict", result="ACTIVE_METADATA_REJECTED_AT_PACKET_TX",
+            detail=("control transmitted and fragmented, but the kernel "
+                    "rejected csum_start=14 with errno %s before routing"
+                    % exc.errno))
+        return
+    tx.close()
     frames_a = collect(cap, 1.5)
     act_frags = report_case("active", frames_a, 0x6002, payload_a, None)
 
@@ -508,7 +527,6 @@ def main():
                     "if ip_check_csum_start is present the packet was dropped "
                     "by the fix, otherwise the trigger geometry needs review"))
 
-    tx.close()
     cap.close()
 
 
