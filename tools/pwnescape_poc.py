@@ -31,6 +31,7 @@ Expected on a pre-fix kernel:
 import os
 import socket
 import struct
+import subprocess
 import time
 
 SOL_PACKET = 263
@@ -279,6 +280,30 @@ def snmp_counters():
     return counters
 
 
+def enable_conntrack_defrag():
+    """Install a namespace-local conntrack rule so ingress fragments reassemble."""
+    rules = """
+table ip pwnescape {
+    chain prerouting {
+        type filter hook prerouting priority -150; policy accept;
+        ct state { new, established, related } accept
+    }
+}
+"""
+    try:
+        proc = subprocess.run(["nft", "-f", "-"], input=rules,
+                              text=True, capture_output=True, check=False)
+    except FileNotFoundError:
+        out("conntrack", enabled=False, reason="nft_not_installed")
+        return False
+    if proc.returncode:
+        out("conntrack", enabled=False, returncode=proc.returncode,
+            stderr=proc.stderr.strip().replace(" ", "_"))
+        return False
+    out("conntrack", enabled=True)
+    return True
+
+
 def build_case(ident, csum_start, csum_off, payload):
     """Return ([two ingress IP fragments], reassembled kernel datagram).
 
@@ -486,6 +511,8 @@ def main():
                     "cannot reach ip_do_fragment"))
         return
 
+    enable_conntrack_defrag()
+
     time.sleep(0.3)
     cap = open_capture_socket()
     before = snmp_counters()
@@ -546,7 +573,7 @@ def main():
     if act_frags:
         b0s = sorted({i["b0"] for i in act_frags})
         ihls = sorted({i["ihl"] for i in act_frags})
-        corrupted = any(i["ihl"] != 5 for i in act_frags)
+        corrupted = any(i["ihl"] != 20 for i in act_frags)
         opts = [i["opts"] for i in act_frags if i["opts"]]
         candidate = b""
         if opts:
