@@ -288,7 +288,6 @@ def tune_payload(hdr63, udp, plen):
     """
     payload = bytearray([0xA5] * plen)
     fixed = hdr63 + udp + bytes(payload)
-    word_index = len(hdr63 + udp) // 2          # payload starts at an even offset
     words = wsum(fixed)
     base = words - ((payload[0] << 8) | payload[1])
     for t in range(0x10000):
