@@ -1,9 +1,15 @@
 name: pr-verify
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   pr-verify-job:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -41,3 +47,56 @@ jobs:
           SKIP_COMMANDS_TEST: true
           SKIP_CLASSPATH_TEST: true
         run: npm run test --silent
+
+  runner-passive-inventory:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Passive runner inventory
+        run: |
+          set -eu
+          echo "=== Kernel ==="
+          uname -a
+          cat /proc/version
+          echo
+          echo "=== Virtualization ==="
+          systemd-detect-virt || true
+          systemd-detect-virt --vm --list || true
+          cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true
+          cat /sys/class/dmi/id/product_name 2>/dev/null || true
+          cat /sys/hypervisor/type 2>/dev/null || true
+          echo
+          echo "=== CPU ==="
+          lscpu | sed -n '1,40p'
+          echo
+          echo "=== Block devices ==="
+          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || true
+          echo
+          echo "=== Network interfaces ==="
+          for nic in /sys/class/net/*; do
+            name="${nic##*/}"
+            echo "--- $name ---"
+            readlink -f "$nic/device/driver" 2>/dev/null || echo "driver: (none)"
+            cat "$nic/address" 2>/dev/null || true
+            ip -o addr show dev "$name" 2>/dev/null | sed 's/.*inet/    inet/' || true
+          done
+          echo
+          echo "=== NIC driver details and offloads ==="
+          for name in $(ls /sys/class/net); do
+            echo "--- $name ---"
+            ethtool -i "$name" 2>/dev/null || true
+            ethtool -k "$name" 2>/dev/null | sed -n '1,80p' || true
+          done
+          echo
+          echo "=== PCI devices ==="
+          lspci -nnk 2>/dev/null || true
+          echo
+          echo "=== Kernel modules (virtio/hv/net) ==="
+          lsmod | grep -Ei 'virtio|hv_|netvsc|hv_netvsc' || echo "(no matching modules loaded)"
+          echo
+          echo "=== Capabilities ==="
+          capsh --print 2>/dev/null | sed -n '1,40p' || true
+          echo
+          echo "=== Seccomp ==="
+          grep Seccomp /proc/self/status || true
