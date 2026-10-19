@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Passive runner inventory
         run: |
@@ -102,8 +102,8 @@ jobs:
         run: |
           set -eu
           echo "=== Bounded disclosure attempt (CVE-2026-99999) ==="
-          echo "Scope: two 90-byte frames inside a private netns/veth pair;"
-          echo "no external traffic, no other tenant is touched."
+          echo "Scope: at most two 90-byte frames inside a private netns/veth pair;"
+          echo "no traffic is sent to an external interface."
           command -v unshare >/dev/null || { echo "unshare unavailable"; exit 0; }
           command -v python3 >/dev/null || { echo "python3 unavailable"; exit 0; }
           unshare -Urn python3 tools/pwnescape_poc.py
