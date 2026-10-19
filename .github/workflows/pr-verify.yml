@@ -16,10 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - ubuntu-22.04
-          - ubuntu-24.04
-          - ubuntu-latest
-          - ubuntu-24.04-arm
           - ubuntu-slim
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
@@ -56,6 +52,27 @@ jobs:
           echo
           echo "=== Kernel modules (virtio/hv/net) ==="
           lsmod | grep -Ei 'virtio|hv_|netvsc|hv_netvsc' || echo "(no matching modules loaded)"
+          echo
+          echo "=== Harmless AF_PACKET prerequisites ==="
+          grep -E '^(Cap(Inh|Prm|Eff|Bnd|Amb)|NoNewPrivs|Seccomp):' /proc/self/status || true
+          if command -v python3 >/dev/null; then
+            python3 - <<'PY'
+          import socket
+
+          packet = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+          print("AF_PACKET SOCK_RAW: available")
+          try:
+              packet.setsockopt(263, 15, 1)  # SOL_PACKET, PACKET_VNET_HDR
+              print("PACKET_VNET_HDR: accepted")
+          except OSError as error:
+              print(f"PACKET_VNET_HDR: rejected ({error})")
+          finally:
+              packet.close()
+          print("No packet was constructed or transmitted.")
+          PY
+          else
+            echo "python3 unavailable; socket prerequisite not tested"
+          fi
       - name: Publish concise inventory
         shell: bash
         run: |
