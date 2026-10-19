@@ -376,7 +376,6 @@ def main():
     un = os.uname()
     out("env", kernel=un.release, build=un.version.split("#")[-1].strip(),
         hostname=un.nodename, machine=un.machine)
-
     has_fix = kallsyms_has("ip_check_csum_start")
     has_help = kallsyms_has(" skb_checksum_help")
     out("kernel_fix_symbol", ip_check_csum_start={True: "present", False: "absent",
@@ -396,10 +395,20 @@ def main():
     addr_add(nl, idx["vethQ"], IP_Q, 8)
     route_add(nl, idx["vethQ"], IP_ROUTE_DST, 16)
     neigh_add(nl, idx["vethQ"], IP_DST, MAC_NH)
-    with open("/proc/sys/net/ipv4/ip_forward", "w") as fh:
-        fh.write("1\n")
+    forwarding = None
+    try:
+        with open("/proc/sys/net/ipv4/ip_forward", "w") as fh:
+            fh.write("1\n")
+        forwarding = True
+    except OSError as exc:
+        # /proc/sys may be mounted read-only inside the container; if we run
+        # under `unshare -Urnm` with a fresh procfs (see workflow), this write
+        # succeeds. Report and continue: without forwarding the packet is
+        # dropped before ip_do_fragment and the run yields the control-only
+        # evidence.
+        out("sysctl_warning", op="ip_forward", error=repr(exc))
     out("netns", vethP_ifindex=idx["vethP"], vethQ_ifindex=idx["vethQ"],
-        vethQ_mtu=MTU_EGRESS, ip_forward=1)
+        vethQ_mtu=MTU_EGRESS, ip_forward=forwarding)
 
     time.sleep(0.3)
     tx, cap = open_sockets()
