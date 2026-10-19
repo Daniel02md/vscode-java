@@ -1,6 +1,9 @@
 name: runner-passive-inventory
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -8,13 +11,25 @@ permissions:
 
 jobs:
   inventory:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - ubuntu-slim
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       - name: Passive runner inventory
         run: |
           set -eu
           echo "=== Kernel ==="
+          echo "Runner label: ${{ matrix.runner }}"
+          echo "Runner architecture: $RUNNER_ARCH"
           uname -a
           cat /proc/version
           echo
@@ -30,7 +45,6 @@ jobs:
             name="${nic##*/}"
             echo "--- $name ---"
             readlink -f "$nic/device/driver" 2>/dev/null || echo "driver: (none)"
-            ip -o addr show dev "$name" 2>/dev/null | sed 's/.*inet/    inet/' || true
           done
           echo
           echo "=== NIC driver details and offloads ==="
