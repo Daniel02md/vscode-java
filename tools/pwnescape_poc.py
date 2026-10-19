@@ -300,12 +300,20 @@ def tune_payload(hdr63, udp, plen):
 
 
 def open_sockets():
-    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_IP))
+    out("socket_stage", step="tx_create")
+    tx = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
+    out("socket_stage", step="tx_vnet_hdr")
     tx.setsockopt(SOL_PACKET, PACKET_VNET_HDR, 1)
-    tx.bind(("vethP", 0))
+    out("socket_stage", step="tx_bind")
+    # Python's AF_PACKET address tuple takes the Ethernet protocol in host
+    # byte order; socket() itself takes the network-order protocol value.
+    tx.bind(("vethP", ETH_P_ALL))
+    out("socket_stage", step="capture_create")
     cap = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
-    cap.bind(("vethP", 0))
+    out("socket_stage", step="capture_bind")
+    cap.bind(("vethP", ETH_P_ALL))
     cap.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+    out("socket_stage", step="ready")
     return tx, cap
 
 
@@ -414,6 +422,13 @@ def main():
     out("netns", vethP_ifindex=idx["vethP"], vethQ_ifindex=idx["vethQ"],
         vethQ_mtu=MTU_EGRESS,
         ip_forward={True: "enabled", False: "disabled", None: "unknown"}[forwarding])
+
+    if forwarding is not True:
+        out("verdict", result="BLOCKED_BY_FORWARDING_POLICY",
+            detail=("private netns is writable for links/routes but ip_forward "
+                    "is disabled and /proc/sys is read-only; this geometry "
+                    "cannot reach ip_do_fragment"))
+        return
 
     time.sleep(0.3)
     tx, cap = open_sockets()
