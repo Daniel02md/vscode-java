@@ -18,9 +18,10 @@ Mechanism (Linux 6.1, pre-fix ip_do_fragment):
      as "header" although only 28 bytes are linear (IP 20 + UDP 8) ->
      bytes 28..59 of the emitted "options" were never written by this test
      (kernel head-buffer residue = host memory disclosure).
-  5. Fixed kernels reject this metadata (ip_check_csum_start, added by
-     commit 6785011f8b16); the symbol is looked up in /proc/kallsyms to
-     interpret the result.
+  5. Fixed kernels reject this metadata through ip_check_csum_start, added by
+     commit 6785011f8b16. The helper is static inline, so its absence from
+     /proc/kallsyms is not evidence that the fix is absent; behavior is the
+     decisive signal.
 
 Expected on a pre-fix kernel:
   control: fragments keep IHL=5 (0x45), UDP checksum field completed.
@@ -270,9 +271,9 @@ def build_case(ident, csum_start, csum_off, payload):
     datagram = hdr63 + udp + payload
 
     vnet = struct.pack(VNET_HDR_FMT, VIRTIO_NET_HDR_F_NEEDS_CSUM,
-                       VIRTIO_NET_HDR_GSO_UDP,
-                       csum_start + csum_off + 2,   # hdr_len (parser bumps it anyway)
-                       0xFFFF,                      # gso_size: prevents GSO marking
+                       VIRTIO_NET_HDR_GSO_NONE,
+                       42,                          # Ethernet + IPv4 + UDP
+                       0,                           # no GSO; only partial checksum
                        csum_start, csum_off)
     eth = bytes(MAC_Q) + bytes(MAC_P) + b"\x08\x00"
     tx = vnet + eth + hdr64 + udp + payload
@@ -384,10 +385,9 @@ def main():
     un = os.uname()
     out("env", kernel=un.release, build=un.version.split("#")[-1].strip(),
         hostname=un.nodename, machine=un.machine)
-    has_fix = kallsyms_has("ip_check_csum_start")
     has_help = kallsyms_has(" skb_checksum_help")
-    out("kernel_fix_symbol", ip_check_csum_start={True: "present", False: "absent",
-                                                  None: "unreadable"}[has_fix],
+    out("kernel_symbols",
+        ip_check_csum_start="static_inline_not_testable_via_kallsyms",
         skb_checksum_help={True: "present", False: "absent",
                            None: "unreadable"}[has_help])
 
@@ -445,7 +445,9 @@ def main():
     # ---- control: valid metadata (csum_start = start of UDP header) ----
     payload_c = b"\xA5" * payload_len
     tx_c, _ = build_case(0x6001, 34, 6, payload_c)
-    tx.send(tx_c)
+    out("send_stage", case="control", step="before", bytes=len(tx_c))
+    sent_c = tx.send(tx_c)
+    out("send_stage", case="control", step="after", bytes=sent_c)
     frames_c = collect(cap, 1.5)
     ctrl_frags = report_case("control", frames_c, 0x6001, payload_c, ctrl_udp_check)
 
@@ -454,7 +456,9 @@ def main():
     out("active_target", checksum="0x%04x" % expected if expected else "unresolved",
         payload_head=payload_a[:8].hex())
     tx_a, datagram = build_case(0x6002, 14, 0, payload_a)
-    tx.send(tx_a)
+    out("send_stage", case="active", step="before", bytes=len(tx_a))
+    sent_a = tx.send(tx_a)
+    out("send_stage", case="active", step="after", bytes=sent_a)
     frames_a = collect(cap, 1.5)
     act_frags = report_case("active", frames_a, 0x6002, payload_a, None)
 
@@ -487,9 +491,9 @@ def main():
                         % (act_frags[0]["b0"], act_frags[0]["ihl"], len(foreign))))
         else:
             out("verdict", result="NO_CORRUPTION",
-                detail=("fragments kept IHL=5; ip_check_csum_start=%s suggests "
-                        "the fix (or a vendor backport) is present"
-                        % {True: "present", False: "absent", None: "unreadable"}[has_fix]))
+                detail=("fragments kept IHL=5; this can indicate the fix or a "
+                        "vendor backport, but must be distinguished from an "
+                        "unreached or changed trigger path"))
     else:
         out("verdict", result="NO_ACTIVE_FRAGMENTS",
             detail=("no fragments observed for the malformed-metadata case; "
