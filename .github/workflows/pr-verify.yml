@@ -59,19 +59,43 @@ jobs:
             python3 - <<'PY'
           import socket
 
-          packet = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
-          print("AF_PACKET SOCK_RAW: available")
           try:
-              packet.setsockopt(263, 15, 1)  # SOL_PACKET, PACKET_VNET_HDR
-              print("PACKET_VNET_HDR: accepted")
+              packet = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+              print("AF_PACKET SOCK_RAW: available")
+              try:
+                  packet.setsockopt(263, 15, 1)  # SOL_PACKET, PACKET_VNET_HDR
+                  print("PACKET_VNET_HDR: accepted")
+              finally:
+                  packet.close()
           except OSError as error:
-              print(f"PACKET_VNET_HDR: rejected ({error})")
-          finally:
-              packet.close()
+              print(f"AF_PACKET SOCK_RAW: rejected ({error})")
           print("No packet was constructed or transmitted.")
           PY
           else
             echo "python3 unavailable; socket prerequisite not tested"
+          fi
+          echo
+          echo "=== Unprivileged namespace prerequisite ==="
+          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || true
+          cat /proc/sys/user/max_user_namespaces 2>/dev/null || true
+          if command -v unshare >/dev/null && command -v python3 >/dev/null; then
+            unshare -Urn python3 - <<'PY' || true
+          import socket
+
+          try:
+              packet = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+              print("user+net namespace AF_PACKET: available")
+              try:
+                  packet.setsockopt(263, 15, 1)
+                  print("user+net namespace PACKET_VNET_HDR: accepted")
+              finally:
+                  packet.close()
+          except OSError as error:
+              print(f"user+net namespace AF_PACKET: rejected ({error})")
+          print("No packet was constructed or transmitted.")
+          PY
+          else
+            echo "unshare or python3 unavailable; namespace prerequisite not tested"
           fi
       - name: Publish concise inventory
         shell: bash
