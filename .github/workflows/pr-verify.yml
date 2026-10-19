@@ -102,7 +102,7 @@ jobs:
         run: |
           set -eu
           echo "=== Bounded disclosure attempt (CVE-2026-99999) ==="
-          echo "Scope: at most two QinQ-tagged 98-byte frames inside a private netns;"
+          echo "Scope: at most two QinQ-tagged 1622-byte frames inside a private netns;"
           echo "no traffic is sent to an external interface."
           command -v unshare >/dev/null || { echo "unshare unavailable"; exit 0; }
           command -v python3 >/dev/null || { echo "python3 unavailable"; exit 0; }

