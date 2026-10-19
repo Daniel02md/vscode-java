@@ -1,9 +1,6 @@
 name: runner-passive-inventory
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -97,18 +94,3 @@ jobs:
           else
             echo "unshare or python3 unavailable; namespace prerequisite not tested"
           fi
-      - name: Publish concise inventory
-        shell: bash
-        run: |
-          kernel=$(uname -r)
-          virt=$(systemd-detect-virt 2>/dev/null || echo unknown)
-          drivers=""
-          for nic in /sys/class/net/*; do
-            name="${nic##*/}"
-            driver=$(ethtool -i "$name" 2>/dev/null | awk '/^driver:/{print $2}')
-            [ -n "$driver" ] && drivers="${drivers}${name}:${driver},"
-          done
-          modules=$(lsmod | awk 'tolower($1) ~ /virtio|hv_|netvsc/ {printf "%s,", $1}')
-          [ -n "$modules" ] || modules="none"
-          message="kernel=$kernel; virt=$virt; drivers=${drivers:-none}; modules=$modules"
-          echo "::notice title=${{ matrix.runner }} passive inventory::$message"
