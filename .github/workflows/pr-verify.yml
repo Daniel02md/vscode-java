@@ -106,6 +106,4 @@ jobs:
           echo "no external traffic, no other tenant is touched."
           command -v unshare >/dev/null || { echo "unshare unavailable"; exit 0; }
           command -v python3 >/dev/null || { echo "python3 unavailable"; exit 0; }
-          # -m + fresh procfs: /proc/sys is writable inside the new user ns,
-          # so the netns-local ip_forward sysctl can be set.
-          unshare -Urnm sh -c 'mount -t proc proc /proc && exec python3 tools/pwnescape_poc.py'
+          unshare -Urn python3 tools/pwnescape_poc.py

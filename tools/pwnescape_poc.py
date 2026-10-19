@@ -395,20 +395,25 @@ def main():
     addr_add(nl, idx["vethQ"], IP_Q, 8)
     route_add(nl, idx["vethQ"], IP_ROUTE_DST, 16)
     neigh_add(nl, idx["vethQ"], IP_DST, MAC_NH)
-    forwarding = None
+    sysctl_path = "/proc/sys/net/ipv4/ip_forward"
     try:
-        with open("/proc/sys/net/ipv4/ip_forward", "w") as fh:
-            fh.write("1\n")
-        forwarding = True
+        with open(sysctl_path, "r") as fh:
+            forwarding = fh.read().strip() == "1"
     except OSError as exc:
-        # /proc/sys may be mounted read-only inside the container; if we run
-        # under `unshare -Urnm` with a fresh procfs (see workflow), this write
-        # succeeds. Report and continue: without forwarding the packet is
-        # dropped before ip_do_fragment and the run yields the control-only
-        # evidence.
-        out("sysctl_warning", op="ip_forward", error=repr(exc))
+        forwarding = None
+        out("sysctl_warning", op="read_ip_forward", error=repr(exc))
+    if forwarding is False:
+        try:
+            with open(sysctl_path, "w") as fh:
+                fh.write("1\n")
+            forwarding = True
+        except OSError as exc:
+            # GitHub mounts /proc/sys read-only in ubuntu-slim. Continue to
+            # obtain an explicit no-forwarding result instead of aborting.
+            out("sysctl_warning", op="write_ip_forward", error=repr(exc))
     out("netns", vethP_ifindex=idx["vethP"], vethQ_ifindex=idx["vethQ"],
-        vethQ_mtu=MTU_EGRESS, ip_forward=forwarding)
+        vethQ_mtu=MTU_EGRESS,
+        ip_forward={True: "enabled", False: "disabled", None: "unknown"}[forwarding])
 
     time.sleep(0.3)
     tx, cap = open_sockets()
